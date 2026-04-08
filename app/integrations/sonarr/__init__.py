@@ -1,0 +1,1 @@
+"""Sonarr integration placeholder."""

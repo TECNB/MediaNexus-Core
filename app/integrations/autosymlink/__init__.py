@@ -1,0 +1,1 @@
+"""AutoSymlink integration placeholder."""

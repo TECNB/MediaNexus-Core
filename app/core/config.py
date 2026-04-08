@@ -1,0 +1,100 @@
+import json
+from functools import lru_cache
+from typing import Any
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    app_name: str = "MediaNexus API"
+    app_env: str = "development"
+    debug: bool = False
+    api_v1_prefix: str = "/api/v1"
+    database_url: str = "sqlite:///./app.db"
+    backend_cors_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ]
+    )
+
+    radarr_scheme: str = "http"
+    radarr_host: str | None = None
+    radarr_port: int | None = None
+    radarr_api_key: str | None = None
+    radarr_timeout: float = 10.0
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
+
+    @field_validator("radarr_host", "radarr_port", "radarr_api_key", mode="before")
+    @classmethod
+    def empty_string_to_none(cls, value: Any) -> Any:
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
+
+    @field_validator("radarr_scheme", mode="before")
+    @classmethod
+    def parse_radarr_scheme(cls, value: Any) -> str:
+        if value is None:
+            return "http"
+        if isinstance(value, str):
+            cleaned = value.strip().lower()
+            return cleaned or "http"
+        return str(value).strip().lower()
+
+    @field_validator("radarr_scheme")
+    @classmethod
+    def validate_radarr_scheme(cls, value: str) -> str:
+        if value not in {"http", "https"}:
+            raise ValueError("RADARR_SCHEME must be either 'http' or 'https'")
+        return value
+
+    @field_validator("radarr_timeout", mode="before")
+    @classmethod
+    def parse_radarr_timeout(cls, value: Any) -> float:
+        if value is None:
+            return 10.0
+        if isinstance(value, str) and value.strip() == "":
+            return 10.0
+        return float(value)
+
+    @field_validator("radarr_timeout")
+    @classmethod
+    def validate_radarr_timeout(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("RADARR_TIMEOUT must be greater than 0")
+        return value
+
+    @field_validator("backend_cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: Any) -> list[str]:
+        if value is None or value == "":
+            return []
+
+        if isinstance(value, str):
+            raw_value = value.strip()
+            if raw_value.startswith("["):
+                parsed = json.loads(raw_value)
+                if not isinstance(parsed, list):
+                    raise ValueError("BACKEND_CORS_ORIGINS must be a list")
+                return [str(item).rstrip("/") for item in parsed]
+
+            return [item.strip().rstrip("/") for item in raw_value.split(",") if item.strip()]
+
+        if isinstance(value, list):
+            return [str(item).rstrip("/") for item in value]
+
+        raise ValueError("Invalid BACKEND_CORS_ORIGINS value")
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
