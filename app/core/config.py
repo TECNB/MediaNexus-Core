@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     sonarr_port: int | None = None
     sonarr_api_key: str | None = None
     sonarr_timeout: float = 10.0
+    subtitle_ssh_host: str | None = None
+    subtitle_ssh_port: int = 22
+    subtitle_ssh_username: str | None = None
+    subtitle_ssh_password: str | None = None
+    subtitle_ssh_timeout: float = 10.0
+    subtitle_max_upload_mb: int = 100
+    subtitle_ssh_key_path: str | None = None
+    subtitle_ssh_use_key: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -45,6 +53,10 @@ class Settings(BaseSettings):
         "sonarr_host",
         "sonarr_port",
         "sonarr_api_key",
+        "subtitle_ssh_host",
+        "subtitle_ssh_username",
+        "subtitle_ssh_password",
+        "subtitle_ssh_key_path",
         mode="before",
     )
     @classmethod
@@ -70,7 +82,7 @@ class Settings(BaseSettings):
             raise ValueError(f"{info.field_name.upper()} must be either 'http' or 'https'")
         return value
 
-    @field_validator("radarr_timeout", "sonarr_timeout", mode="before")
+    @field_validator("radarr_timeout", "sonarr_timeout", "subtitle_ssh_timeout", mode="before")
     @classmethod
     def parse_service_timeout(cls, value: Any) -> float:
         if value is None:
@@ -79,9 +91,29 @@ class Settings(BaseSettings):
             return 10.0
         return float(value)
 
-    @field_validator("radarr_timeout", "sonarr_timeout")
+    @field_validator("radarr_timeout", "sonarr_timeout", "subtitle_ssh_timeout")
     @classmethod
     def validate_service_timeout(cls, value: float, info: ValidationInfo) -> float:
+        if value <= 0:
+            raise ValueError(f"{info.field_name.upper()} must be greater than 0")
+        return value
+
+    @field_validator("subtitle_ssh_port", "subtitle_max_upload_mb", mode="before")
+    @classmethod
+    def parse_positive_int_setting(cls, value: Any, info: ValidationInfo) -> int:
+        default_values = {
+            "subtitle_ssh_port": 22,
+            "subtitle_max_upload_mb": 100,
+        }
+        if value is None:
+            return default_values[info.field_name]
+        if isinstance(value, str) and value.strip() == "":
+            return default_values[info.field_name]
+        return int(value)
+
+    @field_validator("subtitle_ssh_port", "subtitle_max_upload_mb")
+    @classmethod
+    def validate_positive_int_setting(cls, value: int, info: ValidationInfo) -> int:
         if value <= 0:
             raise ValueError(f"{info.field_name.upper()} must be greater than 0")
         return value
