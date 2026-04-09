@@ -2,7 +2,7 @@
 
 MediaNexus Backend is a lightweight FastAPI skeleton for a media resource management platform.
 
-This repository currently focuses on a clean backend foundation plus a minimal Radarr movie search proxy:
+This repository currently focuses on a clean backend foundation plus minimal search proxy integrations for Radarr and Sonarr:
 
 - FastAPI application entrypoint
 - Pydantic Settings based configuration
@@ -12,9 +12,10 @@ This repository currently focuses on a clean backend foundation plus a minimal R
 - SQLAlchemy session infrastructure
 - Alembic initialization
 - Radarr movie search integration
+- Sonarr series search integration
 - Reserved directories for future integrations such as Sonarr, Emby, Bazarr, OpenList, CloudDrive2, and AutoSymlink
 
-Only movie search is implemented for external integration in this stage.
+Only search proxy endpoints are implemented for external integrations in this stage.
 
 ## Tech Stack
 
@@ -132,6 +133,59 @@ Failure responses stay in the same envelope. Typical cases are:
 - `503` when Radarr is unreachable or not configured
 - `502` when Radarr returns a non-2xx response or invalid payload
 
+## Sonarr Series Search
+
+Configure Sonarr in `.env`:
+
+```bash
+SONARR_SCHEME=http
+SONARR_HOST=127.0.0.1
+SONARR_PORT=8989
+SONARR_API_KEY=your_sonarr_api_key
+SONARR_TIMEOUT=10
+```
+
+`SONARR_HOST` should be only the host or IP, without scheme or path.
+
+After the backend is running, test the proxy endpoint:
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/resources/series/search?term=breaking%20bad"
+```
+
+The API returns a frontend-friendly mapped series list in the unified response format:
+
+```json
+{
+  "success": true,
+  "message": "ok",
+  "data": {
+    "items": [
+      {
+        "id": "tvdb:81189",
+        "title": "Breaking Bad",
+        "original_title": null,
+        "year": 2008,
+        "overview": "...",
+        "poster": "https://...",
+        "tvdb_id": 81189,
+        "imdb_id": "tt0903747",
+        "tmdb_id": 1396,
+        "status": "ended",
+        "network": "AMC",
+        "series_type": "standard"
+      }
+    ]
+  }
+}
+```
+
+Failure responses stay in the same envelope. Typical cases are:
+
+- `400` when `term` is missing or blank
+- `503` when Sonarr is unreachable or not configured
+- `502` when Sonarr returns a non-2xx response or invalid payload
+
 ## Alembic Status
 
 Alembic has been initialized and wired to the application settings.
@@ -157,6 +211,7 @@ Implemented:
 - Versioned API router
 - Health check endpoints
 - Radarr movie search proxy endpoint
+- Sonarr series search proxy endpoint
 - Environment based settings
 - CORS configuration
 - Unified response schema
@@ -168,7 +223,7 @@ Implemented:
 Not implemented on purpose:
 
 - Radarr add movie or any write operation
-- Sonarr or any other external system integration
+- Sonarr add series or any write operation
 - Business services
 - Authentication and authorization
 - User system

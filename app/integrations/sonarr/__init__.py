@@ -1,1 +1,1 @@
-"""Sonarr integration placeholder."""
+"""Sonarr integration package."""

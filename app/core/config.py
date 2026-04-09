@@ -2,7 +2,7 @@ import json
 from functools import lru_cache
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     radarr_port: int | None = None
     radarr_api_key: str | None = None
     radarr_timeout: float = 10.0
+    sonarr_scheme: str = "http"
+    sonarr_host: str | None = None
+    sonarr_port: int | None = None
+    sonarr_api_key: str | None = None
+    sonarr_timeout: float = 10.0
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -33,16 +38,24 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    @field_validator("radarr_host", "radarr_port", "radarr_api_key", mode="before")
+    @field_validator(
+        "radarr_host",
+        "radarr_port",
+        "radarr_api_key",
+        "sonarr_host",
+        "sonarr_port",
+        "sonarr_api_key",
+        mode="before",
+    )
     @classmethod
     def empty_string_to_none(cls, value: Any) -> Any:
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
 
-    @field_validator("radarr_scheme", mode="before")
+    @field_validator("radarr_scheme", "sonarr_scheme", mode="before")
     @classmethod
-    def parse_radarr_scheme(cls, value: Any) -> str:
+    def parse_service_scheme(cls, value: Any) -> str:
         if value is None:
             return "http"
         if isinstance(value, str):
@@ -50,27 +63,27 @@ class Settings(BaseSettings):
             return cleaned or "http"
         return str(value).strip().lower()
 
-    @field_validator("radarr_scheme")
+    @field_validator("radarr_scheme", "sonarr_scheme")
     @classmethod
-    def validate_radarr_scheme(cls, value: str) -> str:
+    def validate_service_scheme(cls, value: str, info: ValidationInfo) -> str:
         if value not in {"http", "https"}:
-            raise ValueError("RADARR_SCHEME must be either 'http' or 'https'")
+            raise ValueError(f"{info.field_name.upper()} must be either 'http' or 'https'")
         return value
 
-    @field_validator("radarr_timeout", mode="before")
+    @field_validator("radarr_timeout", "sonarr_timeout", mode="before")
     @classmethod
-    def parse_radarr_timeout(cls, value: Any) -> float:
+    def parse_service_timeout(cls, value: Any) -> float:
         if value is None:
             return 10.0
         if isinstance(value, str) and value.strip() == "":
             return 10.0
         return float(value)
 
-    @field_validator("radarr_timeout")
+    @field_validator("radarr_timeout", "sonarr_timeout")
     @classmethod
-    def validate_radarr_timeout(cls, value: float) -> float:
+    def validate_service_timeout(cls, value: float, info: ValidationInfo) -> float:
         if value <= 0:
-            raise ValueError("RADARR_TIMEOUT must be greater than 0")
+            raise ValueError(f"{info.field_name.upper()} must be greater than 0")
         return value
 
     @field_validator("backend_cors_origins", mode="before")
