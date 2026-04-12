@@ -2,6 +2,7 @@ import errno
 import logging
 import posixpath
 import stat
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import paramiko
@@ -25,6 +26,17 @@ class SSHSubtitleStorageConnectionError(SSHSubtitleStorageError):
 
 class SSHSubtitleStorageUploadError(SSHSubtitleStorageError):
     """Raised when a remote upload operation fails."""
+
+
+class SSHSubtitleStorageInspectionError(SSHSubtitleStorageError):
+    """Raised when remote directory inspection fails."""
+
+
+@dataclass(frozen=True)
+class SSHSubtitleStorageFileInfo:
+    name: str
+    size: int
+    is_dir: bool
 
 
 class SSHSubtitleStorage:
@@ -122,6 +134,41 @@ class SSHSubtitleStorage:
                 exc.__class__.__name__,
             )
             raise SSHSubtitleStorageUploadError("failed to upload subtitle file") from exc
+
+    def list_files(self, remote_dir: str) -> list[SSHSubtitleStorageFileInfo]:
+        sftp = self._get_sftp()
+        normalized_remote_dir = posixpath.normpath(remote_dir)
+
+        if not normalized_remote_dir.startswith("/"):
+            raise SSHSubtitleStorageInspectionError("remote directory must be an absolute POSIX path")
+
+        try:
+            entries = sftp.listdir_attr(normalized_remote_dir)
+        except OSError as exc:
+            if self._is_missing_path_error(exc):
+                return []
+            logger.warning(
+                "Failed to list remote subtitle directory remote_dir=%r error=%s",
+                normalized_remote_dir,
+                exc.__class__.__name__,
+            )
+            raise SSHSubtitleStorageInspectionError("failed to inspect remote subtitle directory") from exc
+        except paramiko.SSHException as exc:
+            logger.warning(
+                "Failed to list remote subtitle directory remote_dir=%r error=%s",
+                normalized_remote_dir,
+                exc.__class__.__name__,
+            )
+            raise SSHSubtitleStorageInspectionError("failed to inspect remote subtitle directory") from exc
+
+        return [
+            SSHSubtitleStorageFileInfo(
+                name=entry.filename,
+                size=entry.st_size,
+                is_dir=stat.S_ISDIR(entry.st_mode),
+            )
+            for entry in entries
+        ]
 
     def _validate_configuration(self) -> None:
         missing_fields: list[str] = []

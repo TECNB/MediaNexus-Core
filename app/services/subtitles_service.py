@@ -16,6 +16,8 @@ from app.integrations.storage.ssh_subtitle_storage import (
     SSHSubtitleStorage,
     SSHSubtitleStorageConfigError,
     SSHSubtitleStorageConnectionError,
+    SSHSubtitleStorageFileInfo,
+    SSHSubtitleStorageInspectionError,
     SSHSubtitleStorageUploadError,
 )
 from app.schemas.subtitles import SubtitleUploadResult
@@ -27,10 +29,15 @@ class SubtitleUploadService:
     ALLOWED_SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".sub"}
     ALLOWED_ARCHIVE_EXTENSIONS = {".zip"}
     UNSUPPORTED_ARCHIVE_EXTENSIONS = {".rar"}
+    PRIMARY_STREAM_EXTENSIONS = {".strm"}
+    PRIMARY_VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".ts", ".m2ts", ".wmv"}
+    MOVIE_TARGET_ROOT = PurePosixPath("/srv/media/STRM/Movie")
+    TV_TARGET_ROOT = PurePosixPath("/srv/media/STRM/TV")
+    ANIME_TARGET_ROOT = PurePosixPath("/srv/media/STRM/Anime")
     ALLOWED_TARGET_ROOTS = (
-        PurePosixPath("/srv/media/STRM/Movie"),
-        PurePosixPath("/srv/media/STRM/TV"),
-        PurePosixPath("/srv/media/STRM/Anime"),
+        MOVIE_TARGET_ROOT,
+        TV_TARGET_ROOT,
+        ANIME_TARGET_ROOT,
     )
 
     def __init__(
@@ -45,12 +52,20 @@ class SubtitleUploadService:
         self,
         *,
         file: UploadFile,
-        target_path: str,
-        overwrite: bool = False,
+        target_path: str | None = None,
+        media_type: str | None = None,
+        library_title: str | None = None,
+        library_year: str | int | None = None,
+        overwrite: bool = True,
     ) -> SubtitleUploadResult:
         started_at = perf_counter()
         upload_name = self._get_safe_upload_filename(file.filename)
-        normalized_target_path = self._validate_target_path(target_path)
+        normalized_target_path = self.resolve_target_path(
+            target_path=target_path,
+            media_type=media_type,
+            library_title=library_title,
+            library_year=library_year,
+        )
         upload_extension = Path(upload_name).suffix.lower()
         success = False
         saved_files: list[str] = []
@@ -101,6 +116,73 @@ class SubtitleUploadService:
                 len(skipped_files),
                 duration_ms,
             )
+
+    def resolve_target_path(
+        self,
+        *,
+        target_path: str | None,
+        media_type: str | None,
+        library_title: str | None,
+        library_year: str | int | None,
+    ) -> str:
+        normalized_target_path = self._normalize_optional_text(target_path)
+        normalized_media_type = self._normalize_optional_text(media_type)
+        normalized_library_title = self._normalize_optional_text(library_title)
+        normalized_library_year = self._normalize_optional_value(library_year)
+        has_manual_target_path = bool(normalized_target_path)
+        has_association_fields = any(
+            value is not None
+            for value in (normalized_media_type, normalized_library_title, normalized_library_year)
+        )
+
+        if has_manual_target_path and has_association_fields:
+            raise AppException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                message="invalid upload mode",
+            )
+
+        if has_manual_target_path:
+            return self._validate_target_path(normalized_target_path)
+
+        if has_association_fields:
+            return self._resolve_association_target_path(
+                media_type=normalized_media_type,
+                library_title=normalized_library_title,
+                library_year=normalized_library_year,
+            )
+
+        raise AppException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            message="invalid upload mode",
+        )
+
+    def _resolve_association_target_path(
+        self,
+        *,
+        media_type: str | None,
+        library_title: str | None,
+        library_year: str | int | None,
+    ) -> str:
+        if not media_type or library_year is None:
+            raise AppException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                message="invalid upload mode",
+            )
+
+        normalized_media_type = media_type.lower()
+        if normalized_media_type != "movie":
+            raise AppException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                message="association upload only supports movie for now",
+            )
+
+        normalized_title = self._normalize_library_title_for_folder(library_title)
+        normalized_year = self._parse_library_year(library_year)
+        return self._build_movie_target_path(title=normalized_title, year=normalized_year)
+
+    def _build_movie_target_path(self, *, title: str, year: int) -> str:
+        movie_path = self.MOVIE_TARGET_ROOT / f"{title} ({year})"
+        return self._validate_target_path(str(movie_path))
 
     def _validate_upload_extension(self, extension: str) -> None:
         if extension in self.UNSUPPORTED_ARCHIVE_EXTENSIONS:
@@ -168,6 +250,12 @@ class SubtitleUploadService:
                 message="zip archive does not contain any subtitle files",
             )
 
+        if len(subtitle_files) > 1:
+            raise AppException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                message="zip archive contains multiple subtitle files, which is not supported yet",
+            )
+
         saved_files = self._upload_files(
             local_files=subtitle_files,
             target_path=target_path,
@@ -218,12 +306,19 @@ class SubtitleUploadService:
 
         try:
             with self.storage_factory() as storage:
+                primary_media_file = self._select_primary_media_file(
+                    remote_files=storage.list_files(remote_directory)
+                )
                 saved_files: list[str] = []
                 for local_file in local_files:
+                    remote_filename = self._build_subtitle_target_filename(
+                        primary_media_filename=primary_media_file.name,
+                        subtitle_file=local_file,
+                    )
                     saved_name = storage.upload_file(
                         local_path=local_file,
                         remote_dir=remote_directory,
-                        remote_filename=self._get_safe_upload_filename(local_file.name),
+                        remote_filename=remote_filename,
                         overwrite=overwrite,
                     )
                     saved_files.append(saved_name)
@@ -237,6 +332,11 @@ class SubtitleUploadService:
             raise AppException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 message="failed to connect to remote subtitle server",
+            ) from exc
+        except SSHSubtitleStorageInspectionError as exc:
+            raise AppException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                message="failed to inspect remote subtitle directory",
             ) from exc
         except SSHSubtitleStorageUploadError as exc:
             raise AppException(
@@ -273,6 +373,121 @@ class SubtitleUploadService:
             target_path == allowed_root or allowed_root in target_path.parents
             for allowed_root in self.ALLOWED_TARGET_ROOTS
         )
+
+    def _normalize_optional_text(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized_value = value.strip()
+        return normalized_value or None
+
+    def _normalize_optional_value(self, value: str | int | None) -> str | int | None:
+        if isinstance(value, str):
+            return self._normalize_optional_text(value)
+        return value
+
+    def _select_primary_media_file(
+        self,
+        *,
+        remote_files: list[SSHSubtitleStorageFileInfo],
+    ) -> SSHSubtitleStorageFileInfo:
+        regular_files = [remote_file for remote_file in remote_files if not remote_file.is_dir]
+        strm_candidates = self._filter_remote_files_by_extensions(
+            remote_files=regular_files,
+            extensions=self.PRIMARY_STREAM_EXTENSIONS,
+        )
+        if strm_candidates:
+            return self._pick_largest_remote_file(strm_candidates)
+
+        video_candidates = self._filter_remote_files_by_extensions(
+            remote_files=regular_files,
+            extensions=self.PRIMARY_VIDEO_EXTENSIONS,
+        )
+        if video_candidates:
+            return self._pick_largest_remote_file(video_candidates)
+
+        raise AppException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            message="no primary media file found in target directory",
+        )
+
+    def _filter_remote_files_by_extensions(
+        self,
+        *,
+        remote_files: list[SSHSubtitleStorageFileInfo],
+        extensions: set[str],
+    ) -> list[SSHSubtitleStorageFileInfo]:
+        return [
+            remote_file
+            for remote_file in remote_files
+            if PurePosixPath(remote_file.name).suffix.lower() in extensions
+        ]
+
+    def _pick_largest_remote_file(
+        self,
+        remote_files: list[SSHSubtitleStorageFileInfo],
+    ) -> SSHSubtitleStorageFileInfo:
+        return max(remote_files, key=lambda remote_file: (remote_file.size, remote_file.name))
+
+    def _build_subtitle_target_filename(self, *, primary_media_filename: str, subtitle_file: Path) -> str:
+        primary_media_basename = Path(primary_media_filename).stem.strip()
+        subtitle_extension = subtitle_file.suffix.lower()
+
+        if not primary_media_basename or primary_media_basename in {".", ".."}:
+            raise AppException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                message="no primary media file found in target directory",
+            )
+
+        if subtitle_extension not in self.ALLOWED_SUBTITLE_EXTENSIONS:
+            raise AppException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                message="unsupported file type",
+            )
+
+        return f"{primary_media_basename}{subtitle_extension}"
+
+    def _normalize_library_title_for_folder(self, title: str | None) -> str:
+        normalized_title = (title or "").strip()
+        if not normalized_title:
+            raise AppException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                message="library title is required",
+            )
+
+        normalized_title = normalized_title.replace("/", " ").replace("\\", " ")
+        normalized_title = " ".join(normalized_title.split())
+        if (
+            not normalized_title
+            or "\x00" in normalized_title
+            or ".." in normalized_title
+            or normalized_title in {".", ".."}
+        ):
+            raise AppException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                message="invalid library title",
+            )
+
+        return normalized_title
+
+    def _parse_library_year(self, library_year: str | int) -> int:
+        if isinstance(library_year, int):
+            parsed_year = library_year
+        else:
+            normalized_year = library_year.strip()
+            if not normalized_year or not normalized_year.isdigit():
+                raise AppException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    message="invalid library year",
+                )
+            parsed_year = int(normalized_year)
+
+        if parsed_year < 1000 or parsed_year > 9999:
+            raise AppException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                message="invalid library year",
+            )
+
+        return parsed_year
 
     def _get_safe_upload_filename(self, filename: str | None) -> str:
         normalized_name = PurePosixPath((filename or "").replace("\\", "/")).name.strip()
