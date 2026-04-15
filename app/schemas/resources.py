@@ -44,3 +44,12 @@ class SeriesSearchResult(BaseModel):
     items: list[SeriesSearchItem] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="forbid")
+
+
+class SeriesSeasonsResponseData(BaseModel):
+    tvdb_id: int
+    title: str
+    season_count: int
+    season_numbers: list[int] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")

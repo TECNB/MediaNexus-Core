@@ -19,12 +19,27 @@ class SonarrSeriesImage(BaseModel):
         return value
 
 
+class SonarrSeriesSeason(BaseModel):
+    season_number: int | None = Field(default=None, alias="seasonNumber")
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    @field_validator("season_number", mode="before")
+    @classmethod
+    def normalize_season_number(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        return value
+
+
 class SonarrSeriesLookupItem(BaseModel):
     title: str | None = None
     original_title: str | None = Field(default=None, alias="originalTitle")
     year: int | None = None
     overview: str | None = None
     images: list[SonarrSeriesImage] = Field(default_factory=list)
+    seasons: list["SonarrSeriesSeason"] = Field(default_factory=list)
     tvdb_id: int | None = Field(default=None, alias="tvdbId")
     imdb_id: str | None = Field(default=None, alias="imdbId")
     tmdb_id: int | None = Field(default=None, alias="tmdbId")
@@ -62,6 +77,13 @@ class SonarrSeriesLookupItem(BaseModel):
     @field_validator("images", mode="before")
     @classmethod
     def normalize_images(cls, value: Any) -> list[dict[str, Any]] | list[SonarrSeriesImage]:
+        if value is None:
+            return []
+        return value
+
+    @field_validator("seasons", mode="before")
+    @classmethod
+    def normalize_seasons(cls, value: Any) -> list[dict[str, Any]] | list["SonarrSeriesSeason"]:
         if value is None:
             return []
         return value

@@ -35,6 +35,16 @@ class SonarrClient:
         return {"X-Api-Key": self.settings.sonarr_api_key}
 
     async def search_series(self, term: str) -> list[SonarrSeriesLookupItem]:
+        return await self._lookup_series(term=term)
+
+    async def get_series_by_tvdb_id(self, tvdb_id: int) -> SonarrSeriesLookupItem | None:
+        series_list = await self._lookup_series(term=f"tvdb:{tvdb_id}")
+        for series in series_list:
+            if series.tvdb_id == tvdb_id:
+                return series
+        return None
+
+    async def _lookup_series(self, term: str) -> list[SonarrSeriesLookupItem]:
         url = f"{self.base_url}/api/v3/series/lookup"
 
         try:
