@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     sonarr_port: int | None = None
     sonarr_api_key: str | None = None
     sonarr_timeout: float = 10.0
+    alist_host: str | None = None
+    alist_username: str | None = None
+    alist_password: str | None = None
+    alist_path_tv: str | None = None
+    alist_path_movie: str | None = None
+    alist_timeout: float = 10.0
     subtitle_ssh_host: str | None = None
     subtitle_ssh_port: int = 22
     subtitle_ssh_username: str | None = None
@@ -53,6 +59,11 @@ class Settings(BaseSettings):
         "sonarr_host",
         "sonarr_port",
         "sonarr_api_key",
+        "alist_host",
+        "alist_username",
+        "alist_password",
+        "alist_path_tv",
+        "alist_path_movie",
         "subtitle_ssh_host",
         "subtitle_ssh_username",
         "subtitle_ssh_password",
@@ -82,7 +93,7 @@ class Settings(BaseSettings):
             raise ValueError(f"{info.field_name.upper()} must be either 'http' or 'https'")
         return value
 
-    @field_validator("radarr_timeout", "sonarr_timeout", "subtitle_ssh_timeout", mode="before")
+    @field_validator("radarr_timeout", "sonarr_timeout", "alist_timeout", "subtitle_ssh_timeout", mode="before")
     @classmethod
     def parse_service_timeout(cls, value: Any) -> float:
         if value is None:
@@ -91,7 +102,7 @@ class Settings(BaseSettings):
             return 10.0
         return float(value)
 
-    @field_validator("radarr_timeout", "sonarr_timeout", "subtitle_ssh_timeout")
+    @field_validator("radarr_timeout", "sonarr_timeout", "alist_timeout", "subtitle_ssh_timeout")
     @classmethod
     def validate_service_timeout(cls, value: float, info: ValidationInfo) -> float:
         if value <= 0:
