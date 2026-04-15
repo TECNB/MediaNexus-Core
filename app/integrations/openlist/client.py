@@ -150,12 +150,18 @@ class OpenListClient:
         if response.status_code >= 400 or not self._is_success_payload(payload):
             logger.warning("OpenList refresh path returned non-success path=%s", normalized_path)
 
-    async def ensure_path_ready(self, full_path: str, skip_prefix_path: str) -> None:
+    async def ensure_path_ready(
+        self,
+        full_path: str,
+        skip_prefix_path: str,
+        *,
+        missing_prefix_message: str = "OpenList 基础路径不存在",
+    ) -> None:
         normalized_full_path = self._normalize_path(full_path)
         normalized_prefix_path = self._normalize_path(skip_prefix_path)
 
         if not await self.path_exists(normalized_prefix_path):
-            raise AppException(status_code=503, message="OpenList 电影基础路径不存在")
+            raise AppException(status_code=503, message=missing_prefix_message)
 
         if normalized_full_path == normalized_prefix_path:
             return
