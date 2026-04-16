@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class MovieSearchItem(BaseModel):
@@ -19,6 +19,54 @@ class MovieSearchItem(BaseModel):
 
 class MovieSearchResult(BaseModel):
     items: list[MovieSearchItem] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class MovieQualityProfileItem(BaseModel):
+    id: int
+    name: str
+    is_default: bool = False
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class MovieQualityProfilesResult(BaseModel):
+    items: list[MovieQualityProfileItem] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class MovieAddRequest(BaseModel):
+    tmdb_id: int = Field(gt=0)
+    title: str = Field(min_length=1)
+    year: int = Field(gt=0)
+    quality_profile_id: int = Field(alias="qualityProfileId", gt=0)
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+
+class MovieAddResponseMovie(BaseModel):
+    id: int
+    tmdb_id: int
+    title: str
+    year: int
+    quality_profile_id: int = Field(alias="qualityProfileId")
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
+class MovieAddResult(BaseModel):
+    status: Literal["search_started"] = "search_started"
+    action: Literal["added_then_searched", "updated_existing_then_searched"]
+    movie: MovieAddResponseMovie
 
     model_config = ConfigDict(extra="forbid")
 

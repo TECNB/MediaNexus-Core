@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 
 
 class RadarrMovieImage(BaseModel):
@@ -72,4 +72,88 @@ class RadarrMovieLookupItem(BaseModel):
 
 
 class RadarrMovieLookupResponse(RootModel[list[RadarrMovieLookupItem]]):
+    pass
+
+
+class RadarrMovieResource(BaseModel):
+    id: int | None = None
+    title: str | None = None
+    year: int | None = None
+    tmdb_id: int | None = Field(default=None, alias="tmdbId")
+    title_slug: str | None = Field(default=None, alias="titleSlug")
+    root_folder_path: str | None = Field(default=None, alias="rootFolderPath")
+    quality_profile_id: int | None = Field(default=None, alias="qualityProfileId")
+    minimum_availability: str | None = Field(default=None, alias="minimumAvailability")
+    raw_payload: dict[str, Any] = Field(default_factory=dict, exclude=True)
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_raw_payload(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {**value, "raw_payload": dict(value)}
+        return value
+
+    @field_validator(
+        "title",
+        "title_slug",
+        "root_folder_path",
+        "minimum_availability",
+        mode="before",
+    )
+    @classmethod
+    def normalize_string_fields(cls, value: Any) -> str | None:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        return value
+
+    @field_validator("id", "tmdb_id", "year", "quality_profile_id", mode="before")
+    @classmethod
+    def normalize_int_fields(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        return value
+
+
+class RadarrMovieResourceResponse(RootModel[list[RadarrMovieResource]]):
+    pass
+
+
+class RadarrRootFolder(BaseModel):
+    path: str | None = None
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def normalize_path(cls, value: Any) -> str | None:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        return value
+
+
+class RadarrRootFolderResponse(RootModel[list[RadarrRootFolder]]):
+    pass
+
+
+class RadarrQualityProfile(BaseModel):
+    id: int | None = None
+    name: str | None = None
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def normalize_id(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        return value
+
+
+class RadarrQualityProfileResponse(RootModel[list[RadarrQualityProfile]]):
     pass
