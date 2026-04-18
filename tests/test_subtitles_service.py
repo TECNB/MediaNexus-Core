@@ -39,6 +39,19 @@ class FakeSubtitleStorage:
         return remote_filename
 
 
+class FakeEmbyClient:
+    def __init__(self, enabled: bool = True) -> None:
+        self.enabled = enabled
+        self.refreshed_media_paths: list[str] = []
+
+    @property
+    def is_enabled(self) -> bool:
+        return self.enabled
+
+    def refresh_media_paths(self, media_paths: list[str]) -> None:
+        self.refreshed_media_paths.extend(media_paths)
+
+
 class SubtitleUploadServiceTests(unittest.TestCase):
     def _create_subtitle_file(self, suffix: str = ".srt") -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temp_dir = tempfile.TemporaryDirectory()
@@ -54,7 +67,11 @@ class SubtitleUploadServiceTests(unittest.TestCase):
                 SSHSubtitleStorageFileInfo(name="notes.txt", size=10, is_dir=False),
             ]
         )
-        service = SubtitleUploadService(storage_factory=lambda: storage)
+        emby_client = FakeEmbyClient()
+        service = SubtitleUploadService(
+            storage_factory=lambda: storage,
+            emby_client_factory=lambda: emby_client,
+        )
         temp_dir, subtitle_path = self._create_subtitle_file()
 
         try:
@@ -71,6 +88,13 @@ class SubtitleUploadServiceTests(unittest.TestCase):
             [call["remote_filename"] for call in storage.upload_calls],
             ["Episode 01.srt", "Episode 02.srt"],
         )
+        self.assertEqual(
+            emby_client.refreshed_media_paths,
+            [
+                "/srv/media/STRM/TV/Test Show/Episode 01.strm",
+                "/srv/media/STRM/TV/Test Show/Episode 02.strm",
+            ],
+        )
 
     def test_upload_files_falls_back_to_largest_video_when_no_strm_exists(self) -> None:
         storage = FakeSubtitleStorage(
@@ -80,7 +104,11 @@ class SubtitleUploadServiceTests(unittest.TestCase):
                 SSHSubtitleStorageFileInfo(name="Movie Sample.mkv", size=200, is_dir=False),
             ]
         )
-        service = SubtitleUploadService(storage_factory=lambda: storage)
+        emby_client = FakeEmbyClient()
+        service = SubtitleUploadService(
+            storage_factory=lambda: storage,
+            emby_client_factory=lambda: emby_client,
+        )
         temp_dir, subtitle_path = self._create_subtitle_file(".ass")
 
         try:
@@ -96,6 +124,10 @@ class SubtitleUploadServiceTests(unittest.TestCase):
         self.assertEqual(
             [call["remote_filename"] for call in storage.upload_calls],
             ["Movie Feature.ass"],
+        )
+        self.assertEqual(
+            emby_client.refreshed_media_paths,
+            ["/srv/media/STRM/Movie/Test Movie (2024)/Movie Feature.mkv"],
         )
 
 

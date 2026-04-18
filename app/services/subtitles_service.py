@@ -4,6 +4,7 @@ import posixpath
 import shutil
 import tempfile
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from time import perf_counter
 from typing import Callable
@@ -12,6 +13,7 @@ from fastapi import UploadFile, status
 
 from app.core.config import Settings, get_settings
 from app.core.exceptions import AppException
+from app.integrations.emby.client import EmbyClient, EmbyClientError
 from app.integrations.storage.ssh_subtitle_storage import (
     SSHSubtitleStorage,
     SSHSubtitleStorageConfigError,
@@ -23,6 +25,18 @@ from app.integrations.storage.ssh_subtitle_storage import (
 from app.schemas.subtitles import SubtitleUploadResult
 
 logger = logging.getLogger("app.services.subtitles")
+
+
+@dataclass(frozen=True)
+class SubtitleUploadTarget:
+    primary_media_filename: str
+    subtitle_filename: str
+
+
+@dataclass(frozen=True)
+class UploadedSubtitleTarget:
+    remote_directory: str
+    primary_media_filename: str
 
 
 class SubtitleUploadService:
@@ -44,9 +58,11 @@ class SubtitleUploadService:
         self,
         settings: Settings | None = None,
         storage_factory: Callable[[], SSHSubtitleStorage] | None = None,
+        emby_client_factory: Callable[[], EmbyClient] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.storage_factory = storage_factory or (lambda: SSHSubtitleStorage(settings=self.settings))
+        self.emby_client_factory = emby_client_factory or (lambda: EmbyClient(settings=self.settings))
 
     def upload_subtitles(
         self,
@@ -308,19 +324,28 @@ class SubtitleUploadService:
             with self.storage_factory() as storage:
                 remote_files = storage.list_files(remote_directory)
                 saved_files: list[str] = []
+                uploaded_targets: list[UploadedSubtitleTarget] = []
                 for local_file in local_files:
-                    remote_filenames = self._build_subtitle_target_filenames(
+                    upload_targets = self._build_subtitle_upload_targets(
                         remote_files=remote_files,
                         subtitle_file=local_file,
                     )
-                    for remote_filename in remote_filenames:
+                    for upload_target in upload_targets:
                         saved_name = storage.upload_file(
                             local_path=local_file,
                             remote_dir=remote_directory,
-                            remote_filename=remote_filename,
+                            remote_filename=upload_target.subtitle_filename,
                             overwrite=overwrite,
                         )
                         saved_files.append(saved_name)
+                        uploaded_targets.append(
+                            UploadedSubtitleTarget(
+                                remote_directory=remote_directory,
+                                primary_media_filename=upload_target.primary_media_filename,
+                            )
+                        )
+
+                self._refresh_emby_for_uploaded_subtitles(uploaded_targets)
                 return saved_files
         except SSHSubtitleStorageConfigError as exc:
             raise AppException(
@@ -433,14 +458,14 @@ class SubtitleUploadService:
     ) -> list[SSHSubtitleStorageFileInfo]:
         return sorted(remote_files, key=lambda remote_file: remote_file.name.lower())
 
-    def _build_subtitle_target_filenames(
+    def _build_subtitle_upload_targets(
         self,
         *,
         remote_files: list[SSHSubtitleStorageFileInfo],
         subtitle_file: Path,
-    ) -> list[str]:
+    ) -> list[SubtitleUploadTarget]:
         primary_media_files = self._select_primary_media_files(remote_files=remote_files)
-        target_filenames: list[str] = []
+        upload_targets: list[SubtitleUploadTarget] = []
         seen_filenames: set[str] = set()
 
         for primary_media_file in primary_media_files:
@@ -451,9 +476,40 @@ class SubtitleUploadService:
             if target_filename in seen_filenames:
                 continue
             seen_filenames.add(target_filename)
-            target_filenames.append(target_filename)
+            upload_targets.append(
+                SubtitleUploadTarget(
+                    primary_media_filename=primary_media_file.name,
+                    subtitle_filename=target_filename,
+                )
+            )
 
-        return target_filenames
+        return upload_targets
+
+    def _refresh_emby_for_uploaded_subtitles(
+        self,
+        uploaded_targets: list[UploadedSubtitleTarget],
+    ) -> None:
+        if not uploaded_targets:
+            return
+
+        try:
+            emby_client = self.emby_client_factory()
+        except Exception as exc:
+            logger.warning("Failed to initialize Emby client error_type=%s", exc.__class__.__name__)
+            return
+
+        if not emby_client.is_enabled:
+            return
+
+        media_paths = [
+            posixpath.join(uploaded_target.remote_directory, uploaded_target.primary_media_filename)
+            for uploaded_target in uploaded_targets
+        ]
+
+        try:
+            emby_client.refresh_media_paths(media_paths)
+        except EmbyClientError as exc:
+            logger.warning("Emby refresh skipped error=%s", str(exc))
 
     def _build_subtitle_target_filename(self, *, primary_media_filename: str, subtitle_file: Path) -> str:
         primary_media_basename = Path(primary_media_filename).stem.strip()

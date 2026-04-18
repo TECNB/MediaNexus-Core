@@ -186,6 +186,27 @@ Failure responses stay in the same envelope. Typical cases are:
 - `503` when Sonarr is unreachable or not configured
 - `502` when Sonarr returns a non-2xx response or invalid payload
 
+## Subtitle Upload And Emby Refresh
+
+Subtitle upload can optionally notify Emby after files are copied to the STRM library.
+
+Configure Emby in `.env`:
+
+```bash
+EMBY_URL=http://127.0.0.1:8096
+EMBY_API_KEY=your_emby_api_key
+EMBY_TIMEOUT=10
+EMBY_PATH_PREFIX_FROM=/strm
+EMBY_PATH_PREFIX_TO=/srv/media/STRM
+```
+
+Refresh behavior:
+
+- After subtitle files are uploaded, the backend derives the corresponding media file path for each uploaded subtitle.
+- It first queries Emby with the exact media path and refreshes only the matched `Movie` or `Episode` item.
+- If an exact item match is not found, it falls back to notifying Emby through `Library/Media/Updated` for the unresolved path.
+- If Emby is not configured or temporarily unavailable, subtitle upload still succeeds and the refresh step is skipped with a warning in server logs.
+
 ## Alembic Status
 
 Alembic has been initialized and wired to the application settings.

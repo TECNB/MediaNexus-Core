@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     subtitle_max_upload_mb: int = 100
     subtitle_ssh_key_path: str | None = None
     subtitle_ssh_use_key: bool = False
+    emby_url: str | None = None
+    emby_api_key: str | None = None
+    emby_timeout: float = 10.0
+    emby_path_prefix_from: str | None = None
+    emby_path_prefix_to: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -68,6 +73,10 @@ class Settings(BaseSettings):
         "subtitle_ssh_username",
         "subtitle_ssh_password",
         "subtitle_ssh_key_path",
+        "emby_url",
+        "emby_api_key",
+        "emby_path_prefix_from",
+        "emby_path_prefix_to",
         mode="before",
     )
     @classmethod
