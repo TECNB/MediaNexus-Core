@@ -306,22 +306,21 @@ class SubtitleUploadService:
 
         try:
             with self.storage_factory() as storage:
-                primary_media_file = self._select_primary_media_file(
-                    remote_files=storage.list_files(remote_directory)
-                )
+                remote_files = storage.list_files(remote_directory)
                 saved_files: list[str] = []
                 for local_file in local_files:
-                    remote_filename = self._build_subtitle_target_filename(
-                        primary_media_filename=primary_media_file.name,
+                    remote_filenames = self._build_subtitle_target_filenames(
+                        remote_files=remote_files,
                         subtitle_file=local_file,
                     )
-                    saved_name = storage.upload_file(
-                        local_path=local_file,
-                        remote_dir=remote_directory,
-                        remote_filename=remote_filename,
-                        overwrite=overwrite,
-                    )
-                    saved_files.append(saved_name)
+                    for remote_filename in remote_filenames:
+                        saved_name = storage.upload_file(
+                            local_path=local_file,
+                            remote_dir=remote_directory,
+                            remote_filename=remote_filename,
+                            overwrite=overwrite,
+                        )
+                        saved_files.append(saved_name)
                 return saved_files
         except SSHSubtitleStorageConfigError as exc:
             raise AppException(
@@ -385,25 +384,25 @@ class SubtitleUploadService:
             return self._normalize_optional_text(value)
         return value
 
-    def _select_primary_media_file(
+    def _select_primary_media_files(
         self,
         *,
         remote_files: list[SSHSubtitleStorageFileInfo],
-    ) -> SSHSubtitleStorageFileInfo:
+    ) -> list[SSHSubtitleStorageFileInfo]:
         regular_files = [remote_file for remote_file in remote_files if not remote_file.is_dir]
         strm_candidates = self._filter_remote_files_by_extensions(
             remote_files=regular_files,
             extensions=self.PRIMARY_STREAM_EXTENSIONS,
         )
         if strm_candidates:
-            return self._pick_largest_remote_file(strm_candidates)
+            return self._sort_remote_files_by_name(strm_candidates)
 
         video_candidates = self._filter_remote_files_by_extensions(
             remote_files=regular_files,
             extensions=self.PRIMARY_VIDEO_EXTENSIONS,
         )
         if video_candidates:
-            return self._pick_largest_remote_file(video_candidates)
+            return [self._pick_largest_remote_file(video_candidates)]
 
         raise AppException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -427,6 +426,34 @@ class SubtitleUploadService:
         remote_files: list[SSHSubtitleStorageFileInfo],
     ) -> SSHSubtitleStorageFileInfo:
         return max(remote_files, key=lambda remote_file: (remote_file.size, remote_file.name))
+
+    def _sort_remote_files_by_name(
+        self,
+        remote_files: list[SSHSubtitleStorageFileInfo],
+    ) -> list[SSHSubtitleStorageFileInfo]:
+        return sorted(remote_files, key=lambda remote_file: remote_file.name.lower())
+
+    def _build_subtitle_target_filenames(
+        self,
+        *,
+        remote_files: list[SSHSubtitleStorageFileInfo],
+        subtitle_file: Path,
+    ) -> list[str]:
+        primary_media_files = self._select_primary_media_files(remote_files=remote_files)
+        target_filenames: list[str] = []
+        seen_filenames: set[str] = set()
+
+        for primary_media_file in primary_media_files:
+            target_filename = self._build_subtitle_target_filename(
+                primary_media_filename=primary_media_file.name,
+                subtitle_file=subtitle_file,
+            )
+            if target_filename in seen_filenames:
+                continue
+            seen_filenames.add(target_filename)
+            target_filenames.append(target_filename)
+
+        return target_filenames
 
     def _build_subtitle_target_filename(self, *, primary_media_filename: str, subtitle_file: Path) -> str:
         primary_media_basename = Path(primary_media_filename).stem.strip()
