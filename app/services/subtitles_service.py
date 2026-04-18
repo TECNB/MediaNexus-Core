@@ -1,9 +1,11 @@
+import asyncio
 import logging
 import os
 import posixpath
 import shutil
 import tempfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from time import perf_counter
@@ -12,8 +14,9 @@ from typing import Callable
 from fastapi import UploadFile, status
 
 from app.core.config import Settings, get_settings
-from app.core.exceptions import AppException
+from app.core.exceptions import AppException, InvalidUpstreamResponseError
 from app.integrations.emby.client import EmbyClient, EmbyClientError
+from app.integrations.radarr.client import RadarrClient
 from app.integrations.storage.ssh_subtitle_storage import (
     SSHSubtitleStorage,
     SSHSubtitleStorageConfigError,
@@ -57,10 +60,12 @@ class SubtitleUploadService:
     def __init__(
         self,
         settings: Settings | None = None,
+        radarr_client: RadarrClient | None = None,
         storage_factory: Callable[[], SSHSubtitleStorage] | None = None,
         emby_client_factory: Callable[[], EmbyClient] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
+        self.radarr_client = radarr_client or RadarrClient(settings=self.settings)
         self.storage_factory = storage_factory or (lambda: SSHSubtitleStorage(settings=self.settings))
         self.emby_client_factory = emby_client_factory or (lambda: EmbyClient(settings=self.settings))
 
@@ -70,6 +75,8 @@ class SubtitleUploadService:
         file: UploadFile,
         target_path: str | None = None,
         media_type: str | None = None,
+        tmdb_id: int | None = None,
+        imdb_id: str | None = None,
         library_title: str | None = None,
         library_year: str | int | None = None,
         overwrite: bool = True,
@@ -79,6 +86,8 @@ class SubtitleUploadService:
         normalized_target_path = self.resolve_target_path(
             target_path=target_path,
             media_type=media_type,
+            tmdb_id=tmdb_id,
+            imdb_id=imdb_id,
             library_title=library_title,
             library_year=library_year,
         )
@@ -138,17 +147,26 @@ class SubtitleUploadService:
         *,
         target_path: str | None,
         media_type: str | None,
+        tmdb_id: int | None,
+        imdb_id: str | None,
         library_title: str | None,
         library_year: str | int | None,
     ) -> str:
         normalized_target_path = self._normalize_optional_text(target_path)
         normalized_media_type = self._normalize_optional_text(media_type)
+        normalized_imdb_id = self._normalize_optional_text(imdb_id)
         normalized_library_title = self._normalize_optional_text(library_title)
         normalized_library_year = self._normalize_optional_value(library_year)
         has_manual_target_path = bool(normalized_target_path)
         has_association_fields = any(
             value is not None
-            for value in (normalized_media_type, normalized_library_title, normalized_library_year)
+            for value in (
+                normalized_media_type,
+                tmdb_id,
+                normalized_imdb_id,
+                normalized_library_title,
+                normalized_library_year,
+            )
         )
 
         if has_manual_target_path and has_association_fields:
@@ -163,6 +181,8 @@ class SubtitleUploadService:
         if has_association_fields:
             return self._resolve_association_target_path(
                 media_type=normalized_media_type,
+                tmdb_id=tmdb_id,
+                imdb_id=normalized_imdb_id,
                 library_title=normalized_library_title,
                 library_year=normalized_library_year,
             )
@@ -176,10 +196,12 @@ class SubtitleUploadService:
         self,
         *,
         media_type: str | None,
+        tmdb_id: int | None,
+        imdb_id: str | None,
         library_title: str | None,
         library_year: str | int | None,
     ) -> str:
-        if not media_type or library_year is None:
+        if not media_type:
             raise AppException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 message="invalid upload mode",
@@ -192,9 +214,139 @@ class SubtitleUploadService:
                 message="association upload only supports movie for now",
             )
 
-        normalized_title = self._normalize_library_title_for_folder(library_title)
-        normalized_year = self._parse_library_year(library_year)
+        if tmdb_id is None and not imdb_id:
+            raise AppException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                message="missing stable media id",
+            )
+
+        return self._resolve_movie_target_directory_from_ids(
+            tmdb_id=tmdb_id,
+            imdb_id=imdb_id,
+        )
+
+    def _resolve_movie_target_directory_from_ids(
+        self,
+        *,
+        tmdb_id: int | None,
+        imdb_id: str | None,
+    ) -> str:
+        return self._run_async(
+            self._resolve_movie_target_directory_from_ids_async(
+                tmdb_id=tmdb_id,
+                imdb_id=imdb_id,
+            )
+        )
+
+    async def _resolve_movie_target_directory_from_ids_async(
+        self,
+        *,
+        tmdb_id: int | None,
+        imdb_id: str | None,
+    ) -> str:
+        movie = await self._get_radarr_library_movie(tmdb_id=tmdb_id, imdb_id=imdb_id)
+        if movie is not None:
+            if movie.path:
+                return self._validate_radarr_movie_target_path(movie.path)
+            return self._build_movie_target_path_from_radarr_metadata(
+                title=movie.title,
+                year=movie.year,
+            )
+
+        movie_lookup = await self._lookup_radarr_movie(tmdb_id=tmdb_id, imdb_id=imdb_id)
+        if movie_lookup is None:
+            raise AppException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                message="movie not found in Radarr",
+            )
+
+        return self._build_movie_target_path_from_radarr_metadata(
+            title=movie_lookup.title,
+            year=movie_lookup.year,
+        )
+
+    async def _get_radarr_library_movie(
+        self,
+        *,
+        tmdb_id: int | None,
+        imdb_id: str | None,
+    ):
+        if tmdb_id is not None:
+            movie = await self.radarr_client.get_movie_by_tmdb_id(tmdb_id)
+            if movie is not None:
+                return movie
+
+        if imdb_id:
+            return await self.radarr_client.get_movie_by_imdb_id(imdb_id)
+
+        return None
+
+    async def _lookup_radarr_movie(
+        self,
+        *,
+        tmdb_id: int | None,
+        imdb_id: str | None,
+    ):
+        if tmdb_id is not None:
+            movie = await self.radarr_client.lookup_movie_by_tmdb_id(tmdb_id)
+            if movie is not None:
+                return movie
+
+        if imdb_id:
+            return await self.radarr_client.lookup_movie_by_imdb_id(imdb_id)
+
+        return None
+
+    def _run_async(self, coroutine):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coroutine)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(asyncio.run, coroutine).result()
+
+    def _build_movie_target_path_from_radarr_metadata(self, *, title: str | None, year: int | None) -> str:
+        normalized_title = self._normalize_radarr_movie_title_for_folder(title)
+        normalized_year = self._parse_radarr_movie_year(year)
         return self._build_movie_target_path(title=normalized_title, year=normalized_year)
+
+    def _validate_radarr_movie_target_path(self, target_path: str) -> str:
+        try:
+            return self._validate_target_path(target_path)
+        except AppException as exc:
+            if exc.status_code == status.HTTP_400_BAD_REQUEST:
+                raise AppException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    message="radarr movie path is not within allowed target roots",
+                ) from exc
+            raise
+
+    def _normalize_radarr_movie_title_for_folder(self, title: str | None) -> str:
+        normalized_title = self._normalize_optional_text(title)
+        if not normalized_title:
+            raise InvalidUpstreamResponseError(message="Radarr returned incomplete movie metadata")
+
+        normalized_title = normalized_title.replace("/", " ").replace("\\", " ")
+        normalized_title = " ".join(normalized_title.split())
+        if (
+            not normalized_title
+            or "\x00" in normalized_title
+            or ".." in normalized_title
+            or normalized_title in {".", ".."}
+        ):
+            raise InvalidUpstreamResponseError(message="Radarr returned invalid movie metadata")
+
+        return normalized_title
+
+    def _parse_radarr_movie_year(self, year: int | None) -> int:
+        if year is None:
+            raise InvalidUpstreamResponseError(message="Radarr returned incomplete movie metadata")
+
+        try:
+            return self._parse_library_year(year)
+        except AppException as exc:
+            raise InvalidUpstreamResponseError(message="Radarr returned invalid movie metadata") from exc
 
     def _build_movie_target_path(self, *, title: str, year: int) -> str:
         movie_path = self.MOVIE_TARGET_ROOT / f"{title} ({year})"

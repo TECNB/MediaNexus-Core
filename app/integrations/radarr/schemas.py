@@ -80,6 +80,8 @@ class RadarrMovieResource(BaseModel):
     title: str | None = None
     year: int | None = None
     tmdb_id: int | None = Field(default=None, alias="tmdbId")
+    imdb_id: str | None = Field(default=None, alias="imdbId")
+    path: str | None = None
     title_slug: str | None = Field(default=None, alias="titleSlug")
     root_folder_path: str | None = Field(default=None, alias="rootFolderPath")
     quality_profile_id: int | None = Field(default=None, alias="qualityProfileId")
@@ -97,6 +99,8 @@ class RadarrMovieResource(BaseModel):
 
     @field_validator(
         "title",
+        "imdb_id",
+        "path",
         "title_slug",
         "root_folder_path",
         "minimum_availability",

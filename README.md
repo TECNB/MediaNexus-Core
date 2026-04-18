@@ -207,6 +207,21 @@ Refresh behavior:
 - If an exact item match is not found, it falls back to notifying Emby through `Library/Media/Updated` for the unresolved path.
 - If Emby is not configured or temporarily unavailable, subtitle upload still succeeds and the refresh step is skipped with a warning in server logs.
 
+Upload modes for `POST /api/v1/subtitles/upload`:
+
+- Manual mode: send `target_path` directly. The path must stay under `/srv/media/STRM/Movie`, `/srv/media/STRM/TV`, or `/srv/media/STRM/Anime`.
+- Movie association mode: send `media_type=movie` together with `tmdb_id` and optionally `imdb_id`.
+- In movie association mode the backend first asks Radarr for an existing movie and prefers Radarr's `path` when present.
+- If Radarr does not return a usable `path`, the backend falls back to Radarr's English `title + year` and builds `/srv/media/STRM/Movie/{title} ({year})`.
+- Legacy `library_title` and `library_year` fields are still accepted for backward compatibility, but the new directory resolution flow no longer depends on them.
+
+Typical failure responses:
+
+- `400` for invalid upload mode, missing stable media ID, or an unsafe target directory
+- `404` when Radarr cannot find the requested movie
+- `503` when Radarr is unreachable or not configured
+- `502` when Radarr returns an invalid response
+
 ## Alembic Status
 
 Alembic has been initialized and wired to the application settings.

@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.core.exceptions import AppException
+from app.integrations.radarr.schemas import RadarrMovieLookupItem, RadarrMovieResource
 from app.integrations.storage.ssh_subtitle_storage import SSHSubtitleStorageFileInfo
 from app.services.subtitles_service import SubtitleUploadService
 
@@ -50,6 +52,38 @@ class FakeEmbyClient:
 
     def refresh_media_paths(self, media_paths: list[str]) -> None:
         self.refreshed_media_paths.extend(media_paths)
+
+
+class FakeRadarrClient:
+    def __init__(
+        self,
+        *,
+        movie_by_tmdb: RadarrMovieResource | None = None,
+        movie_by_imdb: RadarrMovieResource | None = None,
+        lookup_by_tmdb: RadarrMovieLookupItem | None = None,
+        lookup_by_imdb: RadarrMovieLookupItem | None = None,
+    ) -> None:
+        self.movie_by_tmdb = movie_by_tmdb
+        self.movie_by_imdb = movie_by_imdb
+        self.lookup_by_tmdb = lookup_by_tmdb
+        self.lookup_by_imdb = lookup_by_imdb
+        self.calls: list[tuple[str, object]] = []
+
+    async def get_movie_by_tmdb_id(self, tmdb_id: int) -> RadarrMovieResource | None:
+        self.calls.append(("get_movie_by_tmdb_id", tmdb_id))
+        return self.movie_by_tmdb
+
+    async def get_movie_by_imdb_id(self, imdb_id: str) -> RadarrMovieResource | None:
+        self.calls.append(("get_movie_by_imdb_id", imdb_id))
+        return self.movie_by_imdb
+
+    async def lookup_movie_by_tmdb_id(self, tmdb_id: int) -> RadarrMovieLookupItem | None:
+        self.calls.append(("lookup_movie_by_tmdb_id", tmdb_id))
+        return self.lookup_by_tmdb
+
+    async def lookup_movie_by_imdb_id(self, imdb_id: str) -> RadarrMovieLookupItem | None:
+        self.calls.append(("lookup_movie_by_imdb_id", imdb_id))
+        return self.lookup_by_imdb
 
 
 class SubtitleUploadServiceTests(unittest.TestCase):
@@ -129,6 +163,155 @@ class SubtitleUploadServiceTests(unittest.TestCase):
             emby_client.refreshed_media_paths,
             ["/srv/media/STRM/Movie/Test Movie (2024)/Movie Feature.mkv"],
         )
+
+    def test_resolve_target_path_prefers_radarr_movie_path_for_tmdb_id(self) -> None:
+        radarr_client = FakeRadarrClient(
+            movie_by_tmdb=RadarrMovieResource.model_validate(
+                {
+                    "tmdbId": 157336,
+                    "imdbId": "tt0816692",
+                    "title": "Interstellar",
+                    "year": 2014,
+                    "path": "/srv/media/STRM/Movie/Interstellar (2014)",
+                }
+            )
+        )
+        service = SubtitleUploadService(radarr_client=radarr_client)
+
+        resolved_path = service.resolve_target_path(
+            target_path=None,
+            media_type="movie",
+            tmdb_id=157336,
+            imdb_id=None,
+            library_title=None,
+            library_year=None,
+        )
+
+        self.assertEqual(resolved_path, "/srv/media/STRM/Movie/Interstellar (2014)")
+        self.assertEqual(radarr_client.calls, [("get_movie_by_tmdb_id", 157336)])
+
+    def test_resolve_target_path_falls_back_to_radarr_title_and_year_when_path_missing(self) -> None:
+        radarr_client = FakeRadarrClient(
+            movie_by_tmdb=RadarrMovieResource.model_validate(
+                {
+                    "tmdbId": 872585,
+                    "title": "Oppenheimer",
+                    "year": 2023,
+                }
+            )
+        )
+        service = SubtitleUploadService(radarr_client=radarr_client)
+
+        resolved_path = service.resolve_target_path(
+            target_path=None,
+            media_type="movie",
+            tmdb_id=872585,
+            imdb_id=None,
+            library_title="奥本海默",
+            library_year="2023",
+        )
+
+        self.assertEqual(resolved_path, "/srv/media/STRM/Movie/Oppenheimer (2023)")
+
+    def test_resolve_target_path_uses_imdb_id_when_tmdb_id_is_missing(self) -> None:
+        radarr_client = FakeRadarrClient(
+            movie_by_imdb=RadarrMovieResource.model_validate(
+                {
+                    "imdbId": "tt0816692",
+                    "title": "Interstellar",
+                    "year": 2014,
+                    "path": "/srv/media/STRM/Movie/Interstellar (2014)",
+                }
+            )
+        )
+        service = SubtitleUploadService(radarr_client=radarr_client)
+
+        resolved_path = service.resolve_target_path(
+            target_path=None,
+            media_type="movie",
+            tmdb_id=None,
+            imdb_id="tt0816692",
+            library_title=None,
+            library_year=None,
+        )
+
+        self.assertEqual(resolved_path, "/srv/media/STRM/Movie/Interstellar (2014)")
+        self.assertEqual(radarr_client.calls, [("get_movie_by_imdb_id", "tt0816692")])
+
+    def test_resolve_target_path_requires_stable_media_id_for_movie_association(self) -> None:
+        service = SubtitleUploadService(radarr_client=FakeRadarrClient())
+
+        with self.assertRaises(AppException) as exc_info:
+            service.resolve_target_path(
+                target_path=None,
+                media_type="movie",
+                tmdb_id=None,
+                imdb_id=None,
+                library_title="Interstellar",
+                library_year="2014",
+            )
+
+        self.assertEqual(exc_info.exception.status_code, 400)
+        self.assertEqual(exc_info.exception.message, "missing stable media id")
+
+    def test_resolve_target_path_raises_not_found_when_radarr_has_no_movie(self) -> None:
+        service = SubtitleUploadService(radarr_client=FakeRadarrClient())
+
+        with self.assertRaises(AppException) as exc_info:
+            service.resolve_target_path(
+                target_path=None,
+                media_type="movie",
+                tmdb_id=999999,
+                imdb_id=None,
+                library_title=None,
+                library_year=None,
+            )
+
+        self.assertEqual(exc_info.exception.status_code, 404)
+        self.assertEqual(exc_info.exception.message, "movie not found in Radarr")
+
+    def test_resolve_target_path_rejects_radarr_path_outside_allowed_roots(self) -> None:
+        radarr_client = FakeRadarrClient(
+            movie_by_tmdb=RadarrMovieResource.model_validate(
+                {
+                    "tmdbId": 157336,
+                    "title": "Interstellar",
+                    "year": 2014,
+                    "path": "/data/movies/Interstellar (2014)",
+                }
+            )
+        )
+        service = SubtitleUploadService(radarr_client=radarr_client)
+
+        with self.assertRaises(AppException) as exc_info:
+            service.resolve_target_path(
+                target_path=None,
+                media_type="movie",
+                tmdb_id=157336,
+                imdb_id=None,
+                library_title=None,
+                library_year=None,
+            )
+
+        self.assertEqual(exc_info.exception.status_code, 400)
+        self.assertEqual(
+            exc_info.exception.message,
+            "radarr movie path is not within allowed target roots",
+        )
+
+    def test_resolve_target_path_keeps_manual_target_path_mode_working(self) -> None:
+        service = SubtitleUploadService(radarr_client=FakeRadarrClient())
+
+        resolved_path = service.resolve_target_path(
+            target_path="/srv/media/STRM/Movie/Interstellar (2014)/",
+            media_type=None,
+            tmdb_id=None,
+            imdb_id=None,
+            library_title=None,
+            library_year=None,
+        )
+
+        self.assertEqual(resolved_path, "/srv/media/STRM/Movie/Interstellar (2014)")
 
 
 if __name__ == "__main__":

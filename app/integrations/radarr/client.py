@@ -1,5 +1,6 @@
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -75,7 +76,77 @@ class RadarrClient:
             return None
 
         payload = self._json(response=response, operation="movie lookup by tmdb id")
-        return self._extract_movie_resource(payload, tmdb_id=tmdb_id)
+        return self._extract_movie_resource_matching(
+            payload,
+            matches=lambda movie: movie.tmdb_id == tmdb_id,
+            error_context=f"tmdb_id={tmdb_id}",
+        )
+
+    async def get_movie_by_imdb_id(self, imdb_id: str) -> RadarrMovieResource | None:
+        response = await self._request(
+            "GET",
+            "/api/v3/movie",
+            params={"imdbId": imdb_id},
+            operation="movie lookup by imdb id",
+            allowed_status_codes={200, 404},
+        )
+        if response.status_code == 404:
+            return None
+
+        payload = self._json(response=response, operation="movie lookup by imdb id")
+        return self._extract_movie_resource_matching(
+            payload,
+            matches=lambda movie: movie.imdb_id == imdb_id,
+            error_context=f"imdb_id={imdb_id}",
+        )
+
+    async def lookup_movie_by_tmdb_id(self, tmdb_id: int) -> RadarrMovieLookupItem | None:
+        response = await self._request(
+            "GET",
+            "/api/v3/movie/lookup/tmdb",
+            params={"tmdbId": tmdb_id},
+            operation="movie lookup metadata by tmdb id",
+            allowed_status_codes={200, 400, 404},
+        )
+        if response.status_code == 200:
+            payload = self._json(response=response, operation="movie lookup metadata by tmdb id")
+            movie = self._extract_movie_lookup_matching(
+                payload,
+                matches=lambda item: item.tmdb_id == tmdb_id,
+                error_context=f"tmdb_id={tmdb_id}",
+            )
+            if movie is not None:
+                return movie
+
+        return await self._lookup_movie_by_term(
+            term=f"tmdb:{tmdb_id}",
+            matches=lambda item: item.tmdb_id == tmdb_id,
+            error_context=f"tmdb_id={tmdb_id}",
+        )
+
+    async def lookup_movie_by_imdb_id(self, imdb_id: str) -> RadarrMovieLookupItem | None:
+        response = await self._request(
+            "GET",
+            "/api/v3/movie/lookup/imdb",
+            params={"imdbId": imdb_id},
+            operation="movie lookup metadata by imdb id",
+            allowed_status_codes={200, 400, 404},
+        )
+        if response.status_code == 200:
+            payload = self._json(response=response, operation="movie lookup metadata by imdb id")
+            movie = self._extract_movie_lookup_matching(
+                payload,
+                matches=lambda item: item.imdb_id == imdb_id,
+                error_context=f"imdb_id={imdb_id}",
+            )
+            if movie is not None:
+                return movie
+
+        return await self._lookup_movie_by_term(
+            term=f"imdb:{imdb_id}",
+            matches=lambda item: item.imdb_id == imdb_id,
+            error_context=f"imdb_id={imdb_id}",
+        )
 
     async def get_quality_profiles(self) -> list[RadarrQualityProfile]:
         response = await self._request(
@@ -314,28 +385,77 @@ class RadarrClient:
                 return quality_profile.id
         raise UpstreamServiceError(message="Radarr 质量配置未配置")
 
-    def _extract_movie_resource(
+    async def _lookup_movie_by_term(
+        self,
+        *,
+        term: str,
+        matches: Callable[[RadarrMovieLookupItem], bool],
+        error_context: str,
+    ) -> RadarrMovieLookupItem | None:
+        response = await self._request(
+            "GET",
+            "/api/v3/movie/lookup",
+            params={"term": term},
+            operation="movie lookup by identifier term",
+        )
+        payload = self._json(response=response, operation="movie lookup by identifier term")
+        return self._extract_movie_lookup_matching(
+            payload,
+            matches=matches,
+            error_context=error_context,
+        )
+
+    def _extract_movie_resource_matching(
         self,
         payload: Any,
         *,
-        tmdb_id: int,
+        matches: Callable[[RadarrMovieResource], bool],
+        error_context: str,
     ) -> RadarrMovieResource | None:
         try:
             if isinstance(payload, list):
                 movies = RadarrMovieResourceResponse.model_validate(payload).root
                 for movie in movies:
-                    if movie.tmdb_id == tmdb_id:
+                    if matches(movie):
                         return movie
                 return None
             if isinstance(payload, dict):
                 movie = RadarrMovieResource.model_validate(payload)
-                if movie.tmdb_id == tmdb_id:
+                if matches(movie):
                     return movie
                 return None
         except ValidationError as exc:
             logger.error(
-                "Radarr movie response validation failed for tmdb_id=%s error_count=%s",
-                tmdb_id,
+                "Radarr movie response validation failed for %s error_count=%s",
+                error_context,
+                len(exc.errors()),
+            )
+            raise InvalidUpstreamResponseError() from exc
+        raise InvalidUpstreamResponseError()
+
+    def _extract_movie_lookup_matching(
+        self,
+        payload: Any,
+        *,
+        matches: Callable[[RadarrMovieLookupItem], bool],
+        error_context: str,
+    ) -> RadarrMovieLookupItem | None:
+        try:
+            if isinstance(payload, list):
+                movies = RadarrMovieLookupResponse.model_validate(payload).root
+                for movie in movies:
+                    if matches(movie):
+                        return movie
+                return None
+            if isinstance(payload, dict):
+                movie = RadarrMovieLookupItem.model_validate(payload)
+                if matches(movie):
+                    return movie
+                return None
+        except ValidationError as exc:
+            logger.error(
+                "Radarr movie lookup response validation failed for %s error_count=%s",
+                error_context,
                 len(exc.errors()),
             )
             raise InvalidUpstreamResponseError() from exc
